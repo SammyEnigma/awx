@@ -35,16 +35,7 @@ For the following playbooks to work, you will need to:
 $ pip install openshift
 ```
 
-If you are not changing any code in the operator itself, git checkout the latest version from https://github.com/ansible/awx-operator/releases, and then run the following command (from the awx-operator repo):
-
-```
-$ alias kubectl="minikube kubectl --"
-$ export NAMESPACE=my-namespace
-$ kubectl create namespace $NAMESPACE
-$ kubectl config set-context --current --namespace=$NAMESPACE
-$ make deploy
-
-```
+If you are not changing any code in the operator itself, git checkout the latest version from https://github.com/ansible/awx-operator/releases, and then follow the instructions in the awx-operator [README](https://github.com/ansible/awx-operator#basic-install).
 
 If making changes to the operator itself, run the following command in the root
 of the awx-operator repo. If not, continue to the next section.
@@ -54,10 +45,9 @@ of the awx-operator repo. If not, continue to the next section.
 ```
 # in awx-operator repo on the branch you want to use
 $ export IMAGE_TAG_BASE=quay.io/<username>/awx-operator
-$ export VERSION=<cusom-tag>
+$ export VERSION=<custom-tag>
 $ make docker-build
 $ docker push ${IMAGE_TAG_BASE}:${VERSION}
-$ make deploy
 ```
 
 ## Deploy AWX into Minikube using the AWX Operator
@@ -71,7 +61,7 @@ In the root of awx-operator:
 ```
 $ ansible-playbook ansible/instantiate-awx-deployment.yml \
     -e development_mode=yes \
-    -e image=quay.io/awx/awx_kube_devel \
+    -e image=ghcr.io/ansible/awx_kube_devel \
     -e image_version=devel \
     -e image_pull_policy=Always \
     -e service_type=nodeport \
@@ -103,7 +93,7 @@ In the root of the AWX repo:
 
 ```
 $ make awx-kube-dev-build
-$ docker push quay.io/awx/awx_kube_devel:${COMPOSE_TAG}
+$ docker push ghcr.io/ansible/awx_kube_devel:${COMPOSE_TAG}
 ```
 
 In the root of awx-operator:
@@ -111,7 +101,7 @@ In the root of awx-operator:
 ```
 $ ansible-playbook ansible/instantiate-awx-deployment.yml \
     -e development_mode=yes \
-    -e image=quay.io/awx/awx_kube_devel \
+    -e image=ghcr.io/ansible/awx_kube_devel \
     -e image_version=${COMPOSE_TAG} \
     -e image_pull_policy=Always \
     -e service_type=nodeport \
@@ -128,7 +118,7 @@ To access via the web browser, run the following command:
 $ minikube service awx-service --url
 ```
 
-To retreive your admin password
+To retrieve your admin password
 ```
 $ kubectl get secrets awx-admin-password -o json | jq '.data.password' | xargs | base64 -d
 ```

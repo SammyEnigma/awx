@@ -8,16 +8,16 @@ from django.db.models import Count
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils.timezone import now
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
-from rest_framework.permissions import SAFE_METHODS
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework import status
 
 from awx.main.constants import ACTIVE_STATES
-from awx.main.utils import get_object_or_400, parse_yaml_or_json
-from awx.main.models.ha import Instance, InstanceGroup
+from awx.main.models import Organization
+from awx.main.utils import get_object_or_400
+from awx.main.models.ha import Instance, InstanceGroup, schedule_policy_task
 from awx.main.models.organization import Team
 from awx.main.models.projects import Project
 from awx.main.models.inventory import Inventory
@@ -51,7 +51,7 @@ class UnifiedJobDeletionMixin(object):
                 return Response({"error": _("Job has not finished processing events.")}, status=status.HTTP_400_BAD_REQUEST)
             else:
                 # if it has been > 1 minute, events are probably lost
-                logger.warning('Allowing deletion of {} through the API without all events ' 'processed.'.format(obj.log_format))
+                logger.warning('Allowing deletion of {} through the API without all events processed.'.format(obj.log_format))
 
         # Manually cascade delete events if unpartitioned job
         if obj.has_unpartitioned_events:
@@ -61,6 +61,21 @@ class UnifiedJobDeletionMixin(object):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class OrganizationInstanceGroupMembershipMixin(object):
+    """
+    This mixin overloads attach/detach so that it calls Organization.save(),
+    to ensure instance group updates are persisted
+    """
+
+    def unattach(self, request, *args, **kwargs):
+        with transaction.atomic():
+            organization_queryset = Organization.objects.select_for_update()
+            organization = organization_queryset.get(pk=self.get_parent_object().id)
+            response = super(OrganizationInstanceGroupMembershipMixin, self).unattach(request, *args, **kwargs)
+            organization.save()
+            return response
+
+
 class InstanceGroupMembershipMixin(object):
     """
     This mixin overloads attach/detach so that it calls InstanceGroup.save(),
@@ -68,48 +83,26 @@ class InstanceGroupMembershipMixin(object):
     membership.
     """
 
-    def attach_validate(self, request):
-        parent = self.get_parent_object()
-        sub_id, res = super().attach_validate(request)
-        if res:  # handle an error
-            return sub_id, res
-        sub = get_object_or_400(self.model, pk=sub_id)
-        attach_errors = self.is_valid_relation(parent, sub)
-        if attach_errors:
-            return sub_id, Response(attach_errors, status=status.HTTP_400_BAD_REQUEST)
-        return sub_id, res
-
     def attach(self, request, *args, **kwargs):
         response = super(InstanceGroupMembershipMixin, self).attach(request, *args, **kwargs)
-        sub_id, res = self.attach_validate(request)
         if status.is_success(response.status_code):
+            sub_id = request.data.get('id', None)
             if self.parent_model is Instance:
                 inst_name = self.get_parent_object().hostname
             else:
                 inst_name = get_object_or_400(self.model, pk=sub_id).hostname
             with transaction.atomic():
-                ig_qs = InstanceGroup.objects.select_for_update()
+                instance_groups_queryset = InstanceGroup.objects.select_for_update()
                 if self.parent_model is Instance:
-                    ig_obj = get_object_or_400(ig_qs, pk=sub_id)
+                    ig_obj = get_object_or_400(instance_groups_queryset, pk=sub_id)
                 else:
                     # similar to get_parent_object, but selected for update
                     parent_filter = {self.lookup_field: self.kwargs.get(self.lookup_field, None)}
-                    ig_obj = get_object_or_404(ig_qs, **parent_filter)
+                    ig_obj = get_object_or_404(instance_groups_queryset, **parent_filter)
                 if inst_name not in ig_obj.policy_instance_list:
                     ig_obj.policy_instance_list.append(inst_name)
                     ig_obj.save(update_fields=['policy_instance_list'])
         return response
-
-    def unattach_validate(self, request):
-        parent = self.get_parent_object()
-        (sub_id, res) = super(InstanceGroupMembershipMixin, self).unattach_validate(request)
-        if res:
-            return (sub_id, res)
-        sub = get_object_or_400(self.model, pk=sub_id)
-        attach_errors = self.is_valid_relation(parent, sub)
-        if attach_errors:
-            return (sub_id, Response(attach_errors, status=status.HTTP_400_BAD_REQUEST))
-        return (sub_id, res)
 
     def unattach(self, request, *args, **kwargs):
         response = super(InstanceGroupMembershipMixin, self).unattach(request, *args, **kwargs)
@@ -120,16 +113,21 @@ class InstanceGroupMembershipMixin(object):
             else:
                 inst_name = get_object_or_400(self.model, pk=sub_id).hostname
             with transaction.atomic():
-                ig_qs = InstanceGroup.objects.select_for_update()
+                instance_groups_queryset = InstanceGroup.objects.select_for_update()
                 if self.parent_model is Instance:
-                    ig_obj = get_object_or_400(ig_qs, pk=sub_id)
+                    ig_obj = get_object_or_400(instance_groups_queryset, pk=sub_id)
                 else:
                     # similar to get_parent_object, but selected for update
                     parent_filter = {self.lookup_field: self.kwargs.get(self.lookup_field, None)}
-                    ig_obj = get_object_or_404(ig_qs, **parent_filter)
+                    ig_obj = get_object_or_404(instance_groups_queryset, **parent_filter)
                 if inst_name in ig_obj.policy_instance_list:
                     ig_obj.policy_instance_list.pop(ig_obj.policy_instance_list.index(inst_name))
                     ig_obj.save(update_fields=['policy_instance_list'])
+
+            # sometimes removing an instance has a non-obvious consequence
+            # this is almost always true if policy_instance_percentage or _minimum is non-zero
+            # after removing a single instance, the other memberships need to be re-balanced
+            schedule_policy_task()
         return response
 
 
@@ -206,35 +204,6 @@ class OrganizationCountsMixin(object):
         full_context['related_field_counts'] = count_context
 
         return full_context
-
-
-class ControlledByScmMixin(object):
-    """
-    Special method to reset SCM inventory commit hash
-    if anything that it manages changes.
-    """
-
-    def _reset_inv_src_rev(self, obj):
-        if self.request.method in SAFE_METHODS or not obj:
-            return
-        project_following_sources = obj.inventory_sources.filter(update_on_project_update=True, source='scm')
-        if project_following_sources:
-            # Allow inventory changes unrelated to variables
-            if self.model == Inventory and (
-                not self.request or not self.request.data or parse_yaml_or_json(self.request.data.get('variables', '')) == parse_yaml_or_json(obj.variables)
-            ):
-                return
-            project_following_sources.update(scm_last_revision='')
-
-    def get_object(self):
-        obj = super(ControlledByScmMixin, self).get_object()
-        self._reset_inv_src_rev(obj)
-        return obj
-
-    def get_parent_object(self):
-        obj = super(ControlledByScmMixin, self).get_parent_object()
-        self._reset_inv_src_rev(obj)
-        return obj
 
 
 class NoTruncateMixin(object):

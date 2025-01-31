@@ -5,7 +5,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ('main', '0089_v360_new_job_event_types'),
     ]
@@ -24,7 +23,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='workflowjobtemplate',
             name='char_prompts',
-            field=awx.main.fields.JSONField(blank=True, default=dict),
+            field=awx.main.fields.JSONBlob(blank=True, default=dict),
         ),
         migrations.AlterField(
             model_name='joblaunchconfig',

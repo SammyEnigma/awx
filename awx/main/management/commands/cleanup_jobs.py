@@ -9,19 +9,16 @@ import re
 
 
 # Django
+from django.apps import apps
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction, connection
+from django.db.models import Min, Max
+from django.db.models.signals import pre_save, post_save, pre_delete, post_delete, m2m_changed
 from django.utils.timezone import now
 
 # AWX
 from awx.main.models import Job, AdHocCommand, ProjectUpdate, InventoryUpdate, SystemJob, WorkflowJob, Notification
-from awx.main.signals import disable_activity_stream, disable_computed_fields
-
-from awx.main.utils.deletion import AWXCollector, pre_delete
-
-
-def unified_job_class_to_event_table_name(job_class):
-    return f'main_{job_class().event_class.__name__.lower()}'
+from awx.main.utils import unified_job_class_to_event_table_name
 
 
 def partition_table_name(job_class, dt):
@@ -80,11 +77,9 @@ class DeleteMeta:
         ).count()
 
     def identify_excluded_partitions(self):
-
         part_drop = {}
 
         for pk, status, created in self.jobs_qs:
-
             part_key = partition_table_name(self.job_class, created)
             if status in ['pending', 'waiting', 'running']:
                 part_drop[part_key] = False
@@ -94,7 +89,7 @@ class DeleteMeta:
         # Note that parts_no_drop _may_ contain the names of partitions that don't exist
         # This can happen when the cleanup of _unpartitioned_* logic leaves behind jobs with status pending, waiting, running. The find_jobs_to_delete() will
         # pick these jobs up.
-        self.parts_no_drop = set([k for k, v in part_drop.items() if v is False])
+        self.parts_no_drop = {k for k, v in part_drop.items() if v is False}
 
     def delete_jobs(self):
         if not self.dry_run:
@@ -105,7 +100,7 @@ class DeleteMeta:
 
         with connection.cursor() as cursor:
             query = "SELECT inhrelid::regclass::text AS child FROM pg_catalog.pg_inherits"
-            query += f" WHERE inhparent = 'public.{tbl_name}'::regclass"
+            query += f" WHERE inhparent = '{tbl_name}'::regclass"
             query += f" AND TO_TIMESTAMP(LTRIM(inhrelid::regclass::text, '{tbl_name}_'), 'YYYYMMDD_HH24') < '{self.cutoff}'"
             query += " ORDER BY inhrelid::regclass::text"
 
@@ -116,7 +111,7 @@ class DeleteMeta:
         partitions_dt = [p for p in partitions_dt if not None]
 
         # convert datetime partition back to string partition
-        partitions_maybe_drop = set([dt_to_partition_name(tbl_name, dt) for dt in partitions_dt])
+        partitions_maybe_drop = {dt_to_partition_name(tbl_name, dt) for dt in partitions_dt}
 
         # Do not drop partition if there is a job that will not be deleted pointing at it
         self.parts_to_drop = partitions_maybe_drop - self.parts_no_drop
@@ -155,7 +150,10 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--days', dest='days', type=int, default=90, metavar='N', help='Remove jobs/updates executed more than N days ago. Defaults to 90.')
-        parser.add_argument('--dry-run', dest='dry_run', action='store_true', default=False, help='Dry run mode (show items that would ' 'be removed)')
+        parser.add_argument('--dry-run', dest='dry_run', action='store_true', default=False, help='Dry run mode (show items that would be removed)')
+        parser.add_argument(
+            '--batch-size', dest='batch_size', type=int, default=100000, metavar='X', help='Remove jobs in batch of X jobs. Defaults to 100000.'
+        )
         parser.add_argument('--jobs', dest='only_jobs', action='store_true', default=False, help='Remove jobs')
         parser.add_argument('--ad-hoc-commands', dest='only_ad_hoc_commands', action='store_true', default=False, help='Remove ad hoc commands')
         parser.add_argument('--project-updates', dest='only_project_updates', action='store_true', default=False, help='Remove project updates')
@@ -163,6 +161,15 @@ class Command(BaseCommand):
         parser.add_argument('--management-jobs', default=False, action='store_true', dest='only_management_jobs', help='Remove management jobs')
         parser.add_argument('--notifications', dest='only_notifications', action='store_true', default=False, help='Remove notifications')
         parser.add_argument('--workflow-jobs', default=False, action='store_true', dest='only_workflow_jobs', help='Remove workflow jobs')
+
+    def init_logging(self):
+        log_levels = dict(enumerate([logging.ERROR, logging.INFO, logging.DEBUG, 0]))
+        self.logger = logging.getLogger('awx.main.commands.cleanup_jobs')
+        self.logger.setLevel(log_levels.get(self.verbosity, 0))
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.propagate = False
 
     def cleanup(self, job_class):
         delete_meta = DeleteMeta(self.logger, job_class, self.cutoff, self.dry_run)
@@ -192,47 +199,81 @@ class Command(BaseCommand):
         delete_meta.delete_jobs()
         return (delete_meta.jobs_no_delete_count, delete_meta.jobs_to_delete_count)
 
-    def _cascade_delete_job_events(self, model, pk_list):
-        if len(pk_list) > 0:
-            with connection.cursor() as cursor:
-                tblname = unified_job_class_to_event_table_name(model)
+    def has_unpartitioned_table(self, model):
+        tblname = unified_job_class_to_event_table_name(model)
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT 1 FROM pg_tables WHERE tablename = '_unpartitioned_{tblname}';")
+            row = cursor.fetchone()
+            if row is None:
+                return False
+        return True
 
+    def _delete_unpartitioned_table(self, model):
+        "If the unpartitioned table is no longer necessary, it will drop the table"
+        tblname = unified_job_class_to_event_table_name(model)
+        if not self.has_unpartitioned_table(model):
+            self.logger.debug(f'Table _unpartitioned_{tblname} does not exist, you are fully migrated.')
+            return
+
+        with connection.cursor() as cursor:
+            # same as UnpartitionedJobEvent.objects.aggregate(Max('created'))
+            cursor.execute(f'SELECT MAX("_unpartitioned_{tblname}"."created") FROM "_unpartitioned_{tblname}";')
+            row = cursor.fetchone()
+            last_created = row[0]
+
+        if last_created:
+            self.logger.info(f'Last event created in _unpartitioned_{tblname} was {last_created.isoformat()}')
+        else:
+            self.logger.info(f'Table _unpartitioned_{tblname} has no events in it')
+
+        if (last_created is None) or (last_created < self.cutoff):
+            self.logger.warning(
+                f'Dropping table _unpartitioned_{tblname} since no records are newer than {self.cutoff}\n'
+                'WARNING - this will happen in a separate transaction so a failure will not roll back prior cleanup'
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(f'DROP TABLE _unpartitioned_{tblname};')
+
+    def _delete_unpartitioned_events(self, model, pk_list):
+        "If unpartitioned job events remain, it will cascade those from jobs in pk_list"
+        tblname = unified_job_class_to_event_table_name(model)
+        rel_name = model().event_parent_key
+
+        # Bail if the unpartitioned table does not exist anymore
+        if not self.has_unpartitioned_table(model):
+            return
+
+        # Table still exists, delete individual unpartitioned events
+        if pk_list:
+            with connection.cursor() as cursor:
+                self.logger.debug(f'Deleting {len(pk_list)} events from _unpartitioned_{tblname}, use a longer cleanup window to delete the table.')
                 pk_list_csv = ','.join(map(str, pk_list))
-                rel_name = model().event_parent_key
-                cursor.execute(f"DELETE FROM _unpartitioned_{tblname} WHERE {rel_name} IN ({pk_list_csv})")
+                cursor.execute(f"DELETE FROM _unpartitioned_{tblname} WHERE {rel_name} IN ({pk_list_csv});")
 
     def cleanup_jobs(self):
-        skipped, deleted = 0, 0
+        # Hack to avoid doing N+1 queries as each item in the Job query set does
+        # an individual query to get the underlying UnifiedJob.
+        Job.polymorphic_super_sub_accessors_replaced = True
 
-        batch_size = 1000000
+        skipped = (Job.objects.filter(created__gte=self.cutoff) | Job.objects.filter(status__in=['pending', 'waiting', 'running'])).count()
 
-        while True:
-            # get queryset for available jobs to remove
-            qs = Job.objects.filter(created__lt=self.cutoff).exclude(status__in=['pending', 'waiting', 'running'])
-            # get pk list for the first N (batch_size) objects
-            pk_list = qs[0:batch_size].values_list('pk', flat=True)
-            # You cannot delete queries with sql LIMIT set, so we must
-            # create a new query from this pk_list
-            qs_batch = Job.objects.filter(pk__in=pk_list)
-            just_deleted = 0
-            if not self.dry_run:
-                self._cascade_delete_job_events(Job, pk_list)
+        qs = Job.objects.select_related('unifiedjob_ptr').filter(created__lt=self.cutoff).exclude(status__in=['pending', 'waiting', 'running'])
+        if self.dry_run:
+            deleted = qs.count()
+            return skipped, deleted
 
-                del_query = pre_delete(qs_batch)
-                collector = AWXCollector(del_query.db)
-                collector.collect(del_query)
-                _, models_deleted = collector.delete()
-                if models_deleted:
-                    just_deleted = models_deleted['main.Job']
-                deleted += just_deleted
-            else:
-                just_deleted = 0  # break from loop, this is dry run
-                deleted = qs.count()
+        deleted = 0
+        info = qs.aggregate(min=Min('id'), max=Max('id'))
+        if info['min'] is not None:
+            for start in range(info['min'], info['max'] + 1, self.batch_size):
+                qs_batch = qs.filter(id__gte=start, id__lte=start + self.batch_size)
+                pk_list = qs_batch.values_list('id', flat=True)
 
-            if just_deleted == 0:
-                break
+                _, results = qs_batch.delete()
+                deleted += results['main.Job']
+                # Avoid dropping the job event table in case we have interacted with it already
+                self._delete_unpartitioned_events(Job, pk_list)
 
-        skipped += (Job.objects.filter(created__gte=self.cutoff) | Job.objects.filter(status__in=['pending', 'waiting', 'running'])).count()
         return skipped, deleted
 
     def cleanup_ad_hoc_commands(self):
@@ -254,7 +295,7 @@ class Command(BaseCommand):
                 deleted += 1
 
         if not self.dry_run:
-            self._cascade_delete_job_events(AdHocCommand, pk_list)
+            self._delete_unpartitioned_events(AdHocCommand, pk_list)
 
         skipped += AdHocCommand.objects.filter(created__gte=self.cutoff).count()
         return skipped, deleted
@@ -282,7 +323,7 @@ class Command(BaseCommand):
                 deleted += 1
 
         if not self.dry_run:
-            self._cascade_delete_job_events(ProjectUpdate, pk_list)
+            self._delete_unpartitioned_events(ProjectUpdate, pk_list)
 
         skipped += ProjectUpdate.objects.filter(created__gte=self.cutoff).count()
         return skipped, deleted
@@ -310,7 +351,7 @@ class Command(BaseCommand):
                 deleted += 1
 
         if not self.dry_run:
-            self._cascade_delete_job_events(InventoryUpdate, pk_list)
+            self._delete_unpartitioned_events(InventoryUpdate, pk_list)
 
         skipped += InventoryUpdate.objects.filter(created__gte=self.cutoff).count()
         return skipped, deleted
@@ -334,19 +375,10 @@ class Command(BaseCommand):
                 deleted += 1
 
         if not self.dry_run:
-            self._cascade_delete_job_events(SystemJob, pk_list)
+            self._delete_unpartitioned_events(SystemJob, pk_list)
 
         skipped += SystemJob.objects.filter(created__gte=self.cutoff).count()
         return skipped, deleted
-
-    def init_logging(self):
-        log_levels = dict(enumerate([logging.ERROR, logging.INFO, logging.DEBUG, 0]))
-        self.logger = logging.getLogger('awx.main.commands.cleanup_jobs')
-        self.logger.setLevel(log_levels.get(self.verbosity, 0))
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter('%(message)s'))
-        self.logger.addHandler(handler)
-        self.logger.propagate = False
 
     def cleanup_workflow_jobs(self):
         skipped, deleted = 0, 0
@@ -388,16 +420,17 @@ class Command(BaseCommand):
         skipped += Notification.objects.filter(created__gte=self.cutoff).count()
         return skipped, deleted
 
-    @transaction.atomic
     def handle(self, *args, **options):
         self.verbosity = int(options.get('verbosity', 1))
         self.init_logging()
         self.days = int(options.get('days', 90))
         self.dry_run = bool(options.get('dry_run', False))
+        self.batch_size = int(options.get('batch_size', 100000))
         try:
             self.cutoff = now() - datetime.timedelta(days=self.days)
         except OverflowError:
             raise CommandError('--days specified is too large. Try something less than 99999 (about 270 years).')
+
         model_names = ('jobs', 'ad_hoc_commands', 'project_updates', 'inventory_updates', 'management_jobs', 'workflow_jobs', 'notifications')
         models_to_cleanup = set()
         for m in model_names:
@@ -405,18 +438,38 @@ class Command(BaseCommand):
                 models_to_cleanup.add(m)
         if not models_to_cleanup:
             models_to_cleanup.update(model_names)
-        with disable_activity_stream(), disable_computed_fields():
-            for m in model_names:
-                if m in models_to_cleanup:
-                    skipped, deleted = getattr(self, 'cleanup_%s' % m)()
 
-                    func = getattr(self, 'cleanup_%s_partition' % m, None)
-                    if func:
-                        skipped_partition, deleted_partition = func()
-                        skipped += skipped_partition
-                        deleted += deleted_partition
+        # Completely disconnect all signal handlers.  This is very aggressive,
+        # but it will be ok since this command is run in its own process.  The
+        # core of the logic is borrowed from Signal.disconnect().
+        for s in (pre_save, post_save, pre_delete, post_delete, m2m_changed):
+            with s.lock:
+                del s.receivers[:]
+                s.sender_receivers_cache.clear()
 
-                    if self.dry_run:
-                        self.logger.log(99, '%s: %d would be deleted, %d would be skipped.', m.replace('_', ' '), deleted, skipped)
-                    else:
-                        self.logger.log(99, '%s: %d deleted, %d skipped.', m.replace('_', ' '), deleted, skipped)
+        with transaction.atomic():
+            for m in models_to_cleanup:
+                skipped, deleted = getattr(self, 'cleanup_%s' % m)()
+
+                func = getattr(self, 'cleanup_%s_partition' % m, None)
+                if func:
+                    skipped_partition, deleted_partition = func()
+                    skipped += skipped_partition
+                    deleted += deleted_partition
+
+                if self.dry_run:
+                    self.logger.log(99, '%s: %d would be deleted, %d would be skipped.', m.replace('_', ' '), deleted, skipped)
+                else:
+                    self.logger.log(99, '%s: %d deleted, %d skipped.', m.replace('_', ' '), deleted, skipped)
+
+        # Deleting unpartitioned tables cannot be done in same transaction as updates to related tables
+        if not self.dry_run:
+            with transaction.atomic():
+                for m in models_to_cleanup:
+                    unified_job_class_name = m[:-1].title().replace('Management', 'System').replace('_', '')
+                    unified_job_class = apps.get_model('main', unified_job_class_name)
+                    try:
+                        unified_job_class().event_class
+                    except (NotImplementedError, AttributeError):
+                        continue  # no need to run this for models without events
+                    self._delete_unpartitioned_table(unified_job_class)

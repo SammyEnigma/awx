@@ -4,8 +4,6 @@
 # Python
 import logging
 
-from django.conf import settings
-
 # Django REST Framework
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework import permissions
@@ -26,8 +24,8 @@ __all__ = [
     'InventoryInventorySourcesUpdatePermission',
     'UserPermission',
     'IsSystemAdminOrAuditor',
-    'InstanceGroupTowerPermission',
     'WorkflowApprovalPermission',
+    'AnalyticsPermission',
 ]
 
 
@@ -250,13 +248,19 @@ class IsSystemAdminOrAuditor(permissions.BasePermission):
         return request.user.is_superuser
 
 
-class InstanceGroupTowerPermission(ModelAccessPermission):
-    def has_object_permission(self, request, view, obj):
-        if request.method == 'DELETE' and obj.name in [settings.DEFAULT_EXECUTION_QUEUE_NAME, settings.DEFAULT_CONTROL_PLANE_QUEUE_NAME]:
-            return False
-        return super(InstanceGroupTowerPermission, self).has_object_permission(request, view, obj)
-
-
 class WebhookKeyPermission(permissions.BasePermission):
     def has_object_permission(self, request, view, obj):
         return request.user.can_access(view.model, 'admin', obj, request.data)
+
+
+class AnalyticsPermission(permissions.BasePermission):
+    """
+    Allows GET/POST/OPTIONS to system admins and system auditors.
+    """
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        if request.method in ["GET", "POST", "OPTIONS"]:
+            return request.user.is_superuser or request.user.is_system_auditor
+        return request.user.is_superuser

@@ -16,9 +16,12 @@ from queue import Full as QueueFull, Empty as QueueEmpty
 from django.conf import settings
 from django.db import connection as django_connection, connections
 from django.core.cache import cache as django_cache
-from django_guid.middleware import GuidMiddleware
+from django.utils.timezone import now as tz_now
+from django_guid import set_guid
 from jinja2 import Template
 import psutil
+
+from ansible_base.lib.logging.runtime import log_excess_runtime
 
 from awx.main.models import UnifiedJob
 from awx.main.dispatch import reaper
@@ -142,7 +145,7 @@ class PoolWorker(object):
                 # when this occurs, it's _fine_ to ignore this KeyError because
                 # the purpose of self.managed_tasks is to just track internal
                 # state of which events are *currently* being processed.
-                logger.warn('Event UUID {} appears to be have been duplicated.'.format(uuid))
+                logger.warning('Event UUID {} appears to be have been duplicated.'.format(uuid))
 
     @property
     def current_task(self):
@@ -191,7 +194,6 @@ class PoolWorker(object):
 
 
 class StatefulPoolWorker(PoolWorker):
-
     track_managed_tasks = True
 
 
@@ -291,8 +293,8 @@ class WorkerPool(object):
                 pass
             except Exception:
                 tb = traceback.format_exc()
-                logger.warn("could not write to queue %s" % preferred_queue)
-                logger.warn("detail: {}".format(tb))
+                logger.warning("could not write to queue %s" % preferred_queue)
+                logger.warning("detail: {}".format(tb))
             write_attempt_order.append(preferred_queue)
         logger.error("could not write payload to any queue, attempted order: {}".format(write_attempt_order))
         return None
@@ -328,12 +330,27 @@ class AutoscalePool(WorkerPool):
             # Get same number as max forks based on memory, this function takes memory as bytes
             self.max_workers = get_mem_effective_capacity(total_memory_gb * 2**30)
 
+            # add magic prime number of extra workers to ensure
+            # we have a few extra workers to run the heartbeat
+            self.max_workers += 7
+
         # max workers can't be less than min_workers
         self.max_workers = max(self.min_workers, self.max_workers)
 
-    def debug(self, *args, **kwargs):
-        self.cleanup()
-        return super(AutoscalePool, self).debug(*args, **kwargs)
+        # the task manager enforces settings.TASK_MANAGER_TIMEOUT on its own
+        # but if the task takes longer than the time defined here, we will force it to stop here
+        self.task_manager_timeout = settings.TASK_MANAGER_TIMEOUT + settings.TASK_MANAGER_TIMEOUT_GRACE_PERIOD
+
+        # initialize some things for subsystem metrics periodic gathering
+        # the AutoscalePool class does not save these to redis directly, but reports via produce_subsystem_metrics
+        self.scale_up_ct = 0
+        self.worker_count_max = 0
+
+    def produce_subsystem_metrics(self, metrics_object):
+        metrics_object.set('dispatcher_pool_scale_up_events', self.scale_up_ct)
+        metrics_object.set('dispatcher_pool_active_task_count', sum(len(w.managed_tasks) for w in self.workers))
+        metrics_object.set('dispatcher_pool_max_worker_count', self.worker_count_max)
+        self.worker_count_max = len(self.workers)
 
     @property
     def should_grow(self):
@@ -351,6 +368,7 @@ class AutoscalePool(WorkerPool):
     def debug_meta(self):
         return 'min={} max={}'.format(self.min_workers, self.max_workers)
 
+    @log_excess_runtime(logger, debug_cutoff=0.05, cutoff=0.2)
     def cleanup(self):
         """
         Perform some internal account and cleanup.  This is run on
@@ -359,8 +377,6 @@ class AutoscalePool(WorkerPool):
         1.  Discover worker processes that exited, and recover messages they
             were handling.
         2.  Clean up unnecessary, idle workers.
-        3.  Check to see if the database says this node is running any tasks
-            that aren't actually running.  If so, reap them.
 
         IMPORTANT: this function is one of the few places in the dispatcher
         (aside from setting lookups) where we talk to the database.  As such,
@@ -383,6 +399,8 @@ class AutoscalePool(WorkerPool):
                                 reaper.reap_job(j, 'failed')
                         except Exception:
                             logger.exception('failed to reap job UUID {}'.format(w.current_task['uuid']))
+                    else:
+                        logger.warning(f'Worker was told to quit but has not, pid={w.pid}')
                 orphaned.extend(w.orphaned_tasks)
                 self.workers.remove(w)
             elif w.idle and len(self.workers) > self.min_workers:
@@ -401,14 +419,16 @@ class AutoscalePool(WorkerPool):
                 # the task manager to never do more work
                 current_task = w.current_task
                 if current_task and isinstance(current_task, dict):
-                    if current_task.get('task', '').endswith('tasks.run_task_manager'):
+                    endings = ('tasks.task_manager', 'tasks.dependency_manager', 'tasks.workflow_manager')
+                    current_task_name = current_task.get('task', '')
+                    if current_task_name.endswith(endings):
                         if 'started' not in current_task:
                             w.managed_tasks[current_task['uuid']]['started'] = time.time()
                         age = time.time() - current_task['started']
                         w.managed_tasks[current_task['uuid']]['age'] = age
-                        if age > (60 * 5):
-                            logger.error(f'run_task_manager has held the advisory lock for >5m, sending SIGTERM to {w.pid}')  # noqa
-                            os.kill(w.pid, signal.SIGTERM)
+                        if age > self.task_manager_timeout:
+                            logger.error(f'{current_task_name} has held the advisory lock for {age}, sending SIGUSR1 to {w.pid}')
+                            os.kill(w.pid, signal.SIGUSR1)
 
         for m in orphaned:
             # if all the workers are dead, spawn at least one
@@ -417,13 +437,17 @@ class AutoscalePool(WorkerPool):
             idx = random.choice(range(len(self.workers)))
             self.write(idx, m)
 
-        # if the database says a job is running on this node, but it's *not*,
-        # then reap it
-        running_uuids = []
-        for worker in self.workers:
-            worker.calculate_managed_tasks()
-            running_uuids.extend(list(worker.managed_tasks.keys()))
-        reaper.reap(excluded_uuids=running_uuids)
+    def add_bind_kwargs(self, body):
+        bind_kwargs = body.pop('bind_kwargs', [])
+        body.setdefault('kwargs', {})
+        if 'dispatch_time' in bind_kwargs:
+            body['kwargs']['dispatch_time'] = tz_now().isoformat()
+        if 'worker_tasks' in bind_kwargs:
+            worker_tasks = {}
+            for worker in self.workers:
+                worker.calculate_managed_tasks()
+                worker_tasks[worker.pid] = list(worker.managed_tasks.keys())
+            body['kwargs']['worker_tasks'] = worker_tasks
 
     def up(self):
         if self.full:
@@ -432,15 +456,19 @@ class AutoscalePool(WorkerPool):
             idx = random.choice(range(len(self.workers)))
             return idx, self.workers[idx]
         else:
-            return super(AutoscalePool, self).up()
+            self.scale_up_ct += 1
+            ret = super(AutoscalePool, self).up()
+            new_worker_ct = len(self.workers)
+            if new_worker_ct > self.worker_count_max:
+                self.worker_count_max = new_worker_ct
+            return ret
 
     def write(self, preferred_queue, body):
         if 'guid' in body:
-            GuidMiddleware.set_guid(body['guid'])
+            set_guid(body['guid'])
         try:
-            # when the cluster heartbeat occurs, clean up internally
-            if isinstance(body, dict) and 'cluster_node_heartbeat' in body['task']:
-                self.cleanup()
+            if isinstance(body, dict) and body.get('bind_kwargs'):
+                self.add_bind_kwargs(body)
             if self.should_grow:
                 self.up()
             # we don't care about "preferred queue" round robin distribution, just
@@ -452,6 +480,10 @@ class AutoscalePool(WorkerPool):
                     w.put(body)
                     break
             else:
+                task_name = 'unknown'
+                if isinstance(body, dict):
+                    task_name = body.get('task')
+                logger.warning(f'Workers maxed, queuing {task_name}, load: {sum(len(w.managed_tasks) for w in self.workers)} / {len(self.workers)}')
                 return super(AutoscalePool, self).write(preferred_queue, body)
         except Exception:
             for conn in connections.all():

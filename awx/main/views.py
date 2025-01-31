@@ -7,7 +7,7 @@ import json
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import render
 from django.utils.html import format_html
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
 
 # Django REST Framework
@@ -21,7 +21,6 @@ def _force_raising_exception(view_obj, request, format=None):
 
 
 class ApiErrorView(views.APIView):
-
     authentication_classes = []
     permission_classes = (permissions.AllowAny,)
     metadata_class = None

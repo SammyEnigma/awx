@@ -2,7 +2,7 @@
 # All Rights Reserved.
 
 # Django
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 # AWX
 from awx.conf import register, fields
@@ -56,16 +56,18 @@ register(
     field_class=fields.IntegerField,
     min_value=100,
     label=_('Max Job Events Retrieved by UI'),
-    help_text=_('Maximum number of job events for the UI to retrieve within a ' 'single request.'),
+    help_text=_('Maximum number of job events for the UI to retrieve within a single request.'),
     category=_('UI'),
     category_slug='ui',
+    hidden=True,
 )
 
 register(
     'UI_LIVE_UPDATES_ENABLED',
     field_class=fields.BooleanField,
     label=_('Enable Live Updates in the UI'),
-    help_text=_('If disabled, the page will not refresh when events are received. ' 'Reloading the page will be required to get the latest details.'),
+    help_text=_('If disabled, the page will not refresh when events are received. Reloading the page will be required to get the latest details.'),
     category=_('UI'),
     category_slug='ui',
+    hidden=True,
 )

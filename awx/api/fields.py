@@ -2,14 +2,13 @@
 # All Rights Reserved.
 
 # Django
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ObjectDoesNotExist
 
 # Django REST Framework
 from rest_framework import serializers
 
 # AWX
-from awx.conf import fields
 from awx.main.models import Credential
 
 __all__ = ['BooleanNullField', 'CharNullField', 'ChoiceNullField', 'VerbatimField']
@@ -28,13 +27,17 @@ class NullFieldMixin(object):
         return (is_empty_value, data)
 
 
-class BooleanNullField(NullFieldMixin, serializers.NullBooleanField):
+class BooleanNullField(NullFieldMixin, serializers.BooleanField):
     """
     Custom boolean field that allows null and empty string as False values.
     """
 
+    def __init__(self, **kwargs):
+        kwargs['allow_null'] = True
+        super().__init__(**kwargs)
+
     def to_internal_value(self, data):
-        return bool(super(BooleanNullField, self).to_internal_value(data))
+        return bool(super().to_internal_value(data))
 
 
 class CharNullField(NullFieldMixin, serializers.CharField):
@@ -47,7 +50,7 @@ class CharNullField(NullFieldMixin, serializers.CharField):
         super(CharNullField, self).__init__(**kwargs)
 
     def to_internal_value(self, data):
-        return super(CharNullField, self).to_internal_value(data or u'')
+        return super(CharNullField, self).to_internal_value(data or '')
 
 
 class ChoiceNullField(NullFieldMixin, serializers.ChoiceField):
@@ -60,7 +63,7 @@ class ChoiceNullField(NullFieldMixin, serializers.ChoiceField):
         super(ChoiceNullField, self).__init__(**kwargs)
 
     def to_internal_value(self, data):
-        return super(ChoiceNullField, self).to_internal_value(data or u'')
+        return super(ChoiceNullField, self).to_internal_value(data or '')
 
 
 class VerbatimField(serializers.Field):
@@ -73,20 +76,6 @@ class VerbatimField(serializers.Field):
 
     def to_representation(self, value):
         return value
-
-
-class OAuth2ProviderField(fields.DictField):
-
-    default_error_messages = {'invalid_key_names': _('Invalid key names: {invalid_key_names}')}
-    valid_key_names = {'ACCESS_TOKEN_EXPIRE_SECONDS', 'AUTHORIZATION_CODE_EXPIRE_SECONDS', 'REFRESH_TOKEN_EXPIRE_SECONDS'}
-    child = fields.IntegerField(min_value=1)
-
-    def to_internal_value(self, data):
-        data = super(OAuth2ProviderField, self).to_internal_value(data)
-        invalid_flags = set(data.keys()) - self.valid_key_names
-        if invalid_flags:
-            self.fail('invalid_key_names', invalid_key_names=', '.join(list(invalid_flags)))
-        return data
 
 
 class DeprecatedCredentialField(serializers.IntegerField):

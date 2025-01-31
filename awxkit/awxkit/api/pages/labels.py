@@ -7,7 +7,6 @@ from . import page
 
 
 class Label(HasCreate, base.Base):
-
     dependencies = [Organization]
     NATURAL_KEY = ('organization', 'name')
 
@@ -40,8 +39,9 @@ page.register_page([resources.label, (resources.labels, 'post')], Label)
 
 
 class Labels(page.PageList, Label):
-
     pass
 
 
-page.register_page([resources.labels, resources.job_labels, resources.job_template_labels, resources.workflow_job_template_labels], Labels)
+page.register_page(
+    [resources.labels, resources.inventory_labels, resources.job_labels, resources.job_template_labels, resources.workflow_job_template_labels], Labels
+)
