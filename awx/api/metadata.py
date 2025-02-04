@@ -6,11 +6,12 @@ from uuid import UUID
 
 # Django
 from django.core.exceptions import PermissionDenied
+from django.db.models import JSONField
 from django.db.models.fields import PositiveIntegerField, BooleanField
 from django.db.models.fields.related import ForeignKey
 from django.http import Http404
-from django.utils.encoding import force_text, smart_text
-from django.utils.translation import ugettext_lazy as _
+from django.utils.encoding import force_str, smart_str
+from django.utils.translation import gettext_lazy as _
 
 # Django REST Framework
 from rest_framework import exceptions
@@ -22,7 +23,7 @@ from rest_framework.request import clone_request
 
 # AWX
 from awx.api.fields import ChoiceNullField
-from awx.main.fields import JSONField, ImplicitRoleField
+from awx.main.fields import ImplicitRoleField
 from awx.main.models import NotificationTemplate
 from awx.main.utils.execution_environments import get_default_pod_spec
 
@@ -35,11 +36,13 @@ class Metadata(metadata.SimpleMetadata):
         field_info = OrderedDict()
         field_info['type'] = self.label_lookup[field]
         field_info['required'] = getattr(field, 'required', False)
+        field_info['hidden'] = getattr(field, 'hidden', False)
 
         text_attrs = [
             'read_only',
             'label',
             'help_text',
+            'warning_text',
             'min_length',
             'max_length',
             'min_value',
@@ -53,7 +56,7 @@ class Metadata(metadata.SimpleMetadata):
         for attr in text_attrs:
             value = getattr(field, attr, None)
             if value is not None and value != '':
-                field_info[attr] = force_text(value, strings_only=True)
+                field_info[attr] = force_str(value, strings_only=True)
 
         placeholder = getattr(field, 'placeholder', serializers.empty)
         if placeholder is not serializers.empty:
@@ -70,14 +73,14 @@ class Metadata(metadata.SimpleMetadata):
                 'url': _('URL for this {}.'),
                 'related': _('Data structure with URLs of related resources.'),
                 'summary_fields': _(
-                    'Data structure with name/description for related resources.  ' 'The output for some objects may be limited for performance reasons.'
+                    'Data structure with name/description for related resources.  The output for some objects may be limited for performance reasons.'
                 ),
                 'created': _('Timestamp when this {} was created.'),
                 'modified': _('Timestamp when this {} was last modified.'),
             }
             if field.field_name in field_help_text:
                 opts = serializer.Meta.model._meta.concrete_model._meta
-                verbose_name = smart_text(opts.verbose_name)
+                verbose_name = smart_str(opts.verbose_name)
                 field_info['help_text'] = field_help_text[field.field_name].format(verbose_name)
 
             if field.field_name == 'type':
@@ -100,7 +103,7 @@ class Metadata(metadata.SimpleMetadata):
             default = field.get_default()
             if type(default) is UUID:
                 default = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
-            if field.field_name == 'TOWER_URL_BASE' and default == 'https://towerhost':
+            if field.field_name == 'TOWER_URL_BASE' and default == 'https://platformhost':
                 default = '{}://{}'.format(self.request.scheme, self.request.get_host())
             field_info['default'] = default
         except serializers.SkipField:
@@ -127,7 +130,7 @@ class Metadata(metadata.SimpleMetadata):
         # Special handling of notification configuration where the required properties
         # are conditional on the type selected.
         if field.field_name == 'notification_configuration':
-            for (notification_type_name, notification_tr_name, notification_type_class) in NotificationTemplate.NOTIFICATION_TYPES:
+            for notification_type_name, notification_tr_name, notification_type_class in NotificationTemplate.NOTIFICATION_TYPES:
                 field_info[notification_type_name] = notification_type_class.init_parameters
 
         # Special handling of notification messages where the required properties
@@ -137,7 +140,7 @@ class Metadata(metadata.SimpleMetadata):
         except (AttributeError, KeyError):
             view_model = None
         if view_model == NotificationTemplate and field.field_name == 'messages':
-            for (notification_type_name, notification_tr_name, notification_type_class) in NotificationTemplate.NOTIFICATION_TYPES:
+            for notification_type_name, notification_tr_name, notification_type_class in NotificationTemplate.NOTIFICATION_TYPES:
                 field_info[notification_type_name] = notification_type_class.default_messages
 
         # Update type of fields returned...

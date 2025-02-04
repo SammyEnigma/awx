@@ -1,6 +1,6 @@
 # Django
 from django.conf import settings
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 # AWX
 from awx.conf import fields, register
@@ -55,6 +55,7 @@ register(
     # Optional; category_slug will be slugified version of category if not
     # explicitly provided.
     category_slug='cows',
+    hidden=True,
 )
 
 

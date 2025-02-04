@@ -12,9 +12,6 @@ import django.db.models.deletion
 from django.conf import settings
 from django.utils.timezone import now
 
-import jsonfield.fields
-import taggit.managers
-
 
 def create_system_job_templates(apps, schema_editor):
     """
@@ -126,7 +123,6 @@ class Migration(migrations.Migration):
     ]
 
     dependencies = [
-        ('taggit', '0002_auto_20150616_2121'),
         ('contenttypes', '0002_remove_content_type_name'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ('main', '0001_initial'),
@@ -199,7 +195,7 @@ class Migration(migrations.Migration):
                 ),
                 ('recipients', models.TextField(default='', editable=False, blank=True)),
                 ('subject', models.TextField(default='', editable=False, blank=True)),
-                ('body', jsonfield.fields.JSONField(default=dict, blank=True)),
+                ('body', awx.main.fields.JSONBlob(default=dict, blank=True)),
             ],
             options={
                 'ordering': ('pk',),
@@ -230,7 +226,7 @@ class Migration(migrations.Migration):
                         ],
                     ),
                 ),
-                ('notification_configuration', jsonfield.fields.JSONField(default=dict)),
+                ('notification_configuration', awx.main.fields.JSONBlob(default=dict)),
                 (
                     'created_by',
                     models.ForeignKey(
@@ -256,12 +252,6 @@ class Migration(migrations.Migration):
                 (
                     'organization',
                     models.ForeignKey(related_name='notification_templates', on_delete=django.db.models.deletion.SET_NULL, to='main.Organization', null=True),
-                ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-                    ),
                 ),
             ],
         ),
@@ -324,9 +314,7 @@ class Migration(migrations.Migration):
                 ('module', models.CharField(max_length=128)),
                 (
                     'facts',
-                    awx.main.fields.JSONBField(
-                        default=dict, help_text='Arbitrary JSON structure of module facts captured at timestamp for a single host.', blank=True
-                    ),
+                    models.JSONField(default=dict, help_text='Arbitrary JSON structure of module facts captured at timestamp for a single host.', blank=True),
                 ),
                 (
                     'host',
@@ -722,12 +710,6 @@ class Migration(migrations.Migration):
                         on_delete=django.db.models.deletion.CASCADE,
                         to='main.Organization',
                         help_text='Organization this label belongs to.',
-                    ),
-                ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
                     ),
                 ),
             ],

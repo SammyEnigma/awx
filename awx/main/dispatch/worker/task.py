@@ -3,11 +3,12 @@ import logging
 import importlib
 import sys
 import traceback
+import time
 
 from kubernetes.config import kube_config
 
 from django.conf import settings
-from django_guid.middleware import GuidMiddleware
+from django_guid import set_guid
 
 from awx.main.tasks.system import dispatch_startup, inform_cluster_of_shutdown
 
@@ -25,8 +26,8 @@ class TaskWorker(BaseWorker):
     `awx.main.dispatch.publish`.
     """
 
-    @classmethod
-    def resolve_callable(cls, task):
+    @staticmethod
+    def resolve_callable(task):
         """
         Transform a dotted notation task into an imported, callable function, e.g.,
 
@@ -45,7 +46,8 @@ class TaskWorker(BaseWorker):
 
         return _call
 
-    def run_callable(self, body):
+    @staticmethod
+    def run_callable(body):
         """
         Given some AMQP message, import the correct Python code and run it.
         """
@@ -54,14 +56,25 @@ class TaskWorker(BaseWorker):
         args = body.get('args', [])
         kwargs = body.get('kwargs', {})
         if 'guid' in body:
-            GuidMiddleware.set_guid(body.pop('guid'))
+            set_guid(body.pop('guid'))
         _call = TaskWorker.resolve_callable(task)
         if inspect.isclass(_call):
             # the callable is a class, e.g., RunJob; instantiate and
             # return its `run()` method
             _call = _call().run
+
+        log_extra = ''
+        logger_method = logger.debug
+        if ('time_ack' in body) and ('time_pub' in body):
+            time_publish = body['time_ack'] - body['time_pub']
+            time_waiting = time.time() - body['time_ack']
+            if time_waiting > 5.0 or time_publish > 5.0:
+                # If task too a very long time to process, add this information to the log
+                log_extra = f' took {time_publish:.4f} to ack, {time_waiting:.4f} in local dispatcher'
+                logger_method = logger.info
         # don't print kwargs, they often contain launch-time secrets
-        logger.debug('task {} starting {}(*{})'.format(uuid, task, args))
+        logger_method(f'task {uuid} starting {task}(*{args}){log_extra}')
+
         return _call(*args, **kwargs)
 
     def perform_work(self, body):

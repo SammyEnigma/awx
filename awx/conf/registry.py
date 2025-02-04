@@ -8,7 +8,7 @@ import logging
 # Django
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.text import slugify
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import gettext_lazy as _
 
 from awx.conf.license import get_license
 
@@ -127,6 +127,8 @@ class SettingsRegistry(object):
         encrypted = bool(field_kwargs.pop('encrypted', False))
         defined_in_file = bool(field_kwargs.pop('defined_in_file', False))
         unit = field_kwargs.pop('unit', None)
+        hidden = field_kwargs.pop('hidden', False)
+        warning_text = field_kwargs.pop('warning_text', None)
         if getattr(field_kwargs.get('child', None), 'source', None) is not None:
             field_kwargs['child'].source = None
         field_instance = field_class(**field_kwargs)
@@ -134,12 +136,14 @@ class SettingsRegistry(object):
         field_instance.category = category
         field_instance.depends_on = depends_on
         field_instance.unit = unit
+        field_instance.hidden = hidden
         if placeholder is not empty:
             field_instance.placeholder = placeholder
         field_instance.defined_in_file = defined_in_file
         if field_instance.defined_in_file:
             field_instance.help_text = str(_('This value has been set manually in a settings file.')) + '\n\n' + str(field_instance.help_text)
         field_instance.encrypted = encrypted
+        field_instance.warning_text = warning_text
         original_field_instance = field_instance
         if field_class != original_field_class:
             original_field_instance = original_field_class(**field_kwargs)

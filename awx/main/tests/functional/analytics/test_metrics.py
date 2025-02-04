@@ -4,7 +4,6 @@ from prometheus_client.parser import text_string_to_metric_families
 from awx.main import models
 from awx.main.analytics.metrics import metrics
 from awx.api.versioning import reverse
-from awx.main.models.rbac import Role
 
 EXPECTED_VALUES = {
     'awx_system_info': 1.0,
@@ -19,8 +18,7 @@ EXPECTED_VALUES = {
     'awx_hosts_total': 1.0,
     'awx_schedules_total': 1.0,
     'awx_sessions_total': 0.0,
-    'awx_sessions_total': 0.0,
-    'awx_sessions_total': 0.0,
+    'awx_status_total': 0.0,
     'awx_running_jobs_total': 0.0,
     'awx_instance_capacity': 100.0,
     'awx_instance_consumed_capacity': 0.0,
@@ -31,6 +29,7 @@ EXPECTED_VALUES = {
     'awx_license_instance_total': 0,
     'awx_license_instance_free': 0,
     'awx_pending_jobs_total': 0,
+    'awx_database_connections_total': 1,
 }
 
 
@@ -66,7 +65,6 @@ def test_metrics_permissions(get, admin, org_admin, alice, bob, organization):
     organization.auditor_role.members.add(bob)
     assert get(get_metrics_view_db_only(), user=bob).status_code == 403
 
-    Role.singleton('system_auditor').members.add(bob)
     bob.is_system_auditor = True
     assert get(get_metrics_view_db_only(), user=bob).status_code == 200
 

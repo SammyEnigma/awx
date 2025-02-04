@@ -7,17 +7,13 @@ from __future__ import unicode_literals
 
 from django.db import migrations, models
 import django.utils.timezone
-import jsonfield.fields
 import django.db.models.deletion
 from django.conf import settings
-import taggit.managers
 import awx.main.fields
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('taggit', '0002_auto_20150616_2121'),
         ('contenttypes', '0002_remove_content_type_name'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
@@ -70,7 +66,7 @@ class Migration(migrations.Migration):
                         ],
                     ),
                 ),
-                ('event_data', jsonfield.fields.JSONField(default=dict, blank=True)),
+                ('event_data', awx.main.fields.JSONBlob(default=dict, blank=True)),
                 ('failed', models.BooleanField(default=False, editable=False)),
                 ('changed', models.BooleanField(default=False, editable=False)),
                 ('counter', models.PositiveIntegerField(default=0)),
@@ -184,12 +180,6 @@ class Migration(migrations.Migration):
                         editable=False,
                         to=settings.AUTH_USER_MODEL,
                         null=True,
-                    ),
-                ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
                     ),
                 ),
             ],
@@ -433,7 +423,7 @@ class Migration(migrations.Migration):
                         ],
                     ),
                 ),
-                ('event_data', jsonfield.fields.JSONField(default=dict, blank=True)),
+                ('event_data', awx.main.fields.JSONBlob(default=dict, blank=True)),
                 ('failed', models.BooleanField(default=False, editable=False)),
                 ('changed', models.BooleanField(default=False, editable=False)),
                 ('host_name', models.CharField(default='', max_length=1024, editable=False)),
@@ -531,12 +521,6 @@ class Migration(migrations.Migration):
                         null=True,
                     ),
                 ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-                    ),
-                ),
                 ('users', models.ManyToManyField(related_name='organizations', to=settings.AUTH_USER_MODEL, blank=True)),
             ],
             options={
@@ -591,12 +575,6 @@ class Migration(migrations.Migration):
                         null=True,
                     ),
                 ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-                    ),
-                ),
             ],
         ),
         migrations.CreateModel(
@@ -623,7 +601,7 @@ class Migration(migrations.Migration):
                 ('dtend', models.DateTimeField(default=None, null=True, editable=False)),
                 ('rrule', models.CharField(max_length=255)),
                 ('next_run', models.DateTimeField(default=None, null=True, editable=False)),
-                ('extra_data', jsonfield.fields.JSONField(default=dict, blank=True)),
+                ('extra_data', awx.main.fields.JSONBlob(default=dict, blank=True)),
                 (
                     'created_by',
                     models.ForeignKey(
@@ -644,12 +622,6 @@ class Migration(migrations.Migration):
                         editable=False,
                         to=settings.AUTH_USER_MODEL,
                         null=True,
-                    ),
-                ),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
                     ),
                 ),
             ],
@@ -689,12 +661,6 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 ('organization', models.ForeignKey(related_name='teams', on_delete=django.db.models.deletion.SET_NULL, to='main.Organization', null=True)),
-                (
-                    'tags',
-                    taggit.managers.TaggableManager(
-                        to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-                    ),
-                ),
                 ('users', models.ManyToManyField(related_name='teams', to=settings.AUTH_USER_MODEL, blank=True)),
             ],
             options={
@@ -751,7 +717,7 @@ class Migration(migrations.Migration):
                 ('elapsed', models.DecimalField(editable=False, max_digits=12, decimal_places=3)),
                 ('job_args', models.TextField(default='', editable=False, blank=True)),
                 ('job_cwd', models.CharField(default='', max_length=1024, editable=False, blank=True)),
-                ('job_env', jsonfield.fields.JSONField(default=dict, editable=False, blank=True)),
+                ('job_env', awx.main.fields.JSONBlob(default=dict, editable=False, blank=True)),
                 ('job_explanation', models.TextField(default='', editable=False, blank=True)),
                 ('start_args', models.TextField(default='', editable=False, blank=True)),
                 ('result_stdout_text', models.TextField(default='', editable=False, blank=True)),
@@ -1035,7 +1001,7 @@ class Migration(migrations.Migration):
                 ('host_config_key', models.CharField(default='', max_length=1024, blank=True)),
                 ('ask_variables_on_launch', models.BooleanField(default=False)),
                 ('survey_enabled', models.BooleanField(default=False)),
-                ('survey_spec', jsonfield.fields.JSONField(default=dict, blank=True)),
+                ('survey_spec', awx.main.fields.JSONBlob(default=dict, blank=True)),
             ],
             options={
                 'ordering': ('name',),
@@ -1270,13 +1236,6 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.AddField(
-            model_name='unifiedjobtemplate',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-            ),
-        ),
-        migrations.AddField(
             model_name='unifiedjob',
             name='created_by',
             field=models.ForeignKey(
@@ -1323,13 +1282,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name='unifiedjob',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-            ),
-        ),
-        migrations.AddField(
-            model_name='unifiedjob',
             name='unified_job_template',
             field=models.ForeignKey(
                 related_name='unifiedjob_unified_jobs',
@@ -1373,13 +1325,6 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.AddField(
-            model_name='inventory',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-            ),
-        ),
-        migrations.AddField(
             model_name='host',
             name='inventory',
             field=models.ForeignKey(related_name='hosts', on_delete=django.db.models.deletion.CASCADE, to='main.Inventory'),
@@ -1410,13 +1355,6 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.AddField(
-            model_name='host',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-            ),
-        ),
-        migrations.AddField(
             model_name='group',
             name='hosts',
             field=models.ManyToManyField(help_text='Hosts associated directly with this group.', related_name='groups', to='main.Host', blank=True),
@@ -1444,13 +1382,6 @@ class Migration(migrations.Migration):
             field=models.ManyToManyField(related_name='children', to='main.Group', blank=True),
         ),
         migrations.AddField(
-            model_name='group',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
-            ),
-        ),
-        migrations.AddField(
             model_name='custominventoryscript',
             name='organization',
             field=models.ForeignKey(
@@ -1459,13 +1390,6 @@ class Migration(migrations.Migration):
                 to='main.Organization',
                 help_text='Organization owning this inventory script',
                 null=True,
-            ),
-        ),
-        migrations.AddField(
-            model_name='custominventoryscript',
-            name='tags',
-            field=taggit.managers.TaggableManager(
-                to='taggit.Tag', through='taggit.TaggedItem', blank=True, help_text='A comma-separated list of tags.', verbose_name='Tags'
             ),
         ),
         migrations.AddField(

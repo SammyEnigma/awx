@@ -13,21 +13,8 @@ from awx.main.models import InventorySource, Inventory, ActivityStream
 @pytest.fixture
 def scm_inventory(inventory, project):
     with mock.patch('awx.main.models.unified_jobs.UnifiedJobTemplate.update'):
-        inventory.inventory_sources.create(
-            name='foobar', update_on_project_update=True, source='scm', source_project=project, scm_last_revision=project.scm_revision
-        )
+        inventory.inventory_sources.create(name='foobar', source='scm', source_project=project)
     return inventory
-
-
-@pytest.fixture
-def factory_scm_inventory(inventory, project):
-    def fn(**kwargs):
-        with mock.patch('awx.main.models.unified_jobs.UnifiedJobTemplate.update'):
-            return inventory.inventory_sources.create(
-                source_project=project, overwrite_vars=True, source='scm', scm_last_revision=project.scm_revision, **kwargs
-            )
-
-    return fn
 
 
 @pytest.mark.django_db
@@ -77,6 +64,22 @@ def test_inventory_host_name_unique(scm_inventory, post, admin_user):
 
 
 @pytest.mark.django_db
+def test_inventory_host_list_ordering(scm_inventory, get, admin_user):
+    # create 3 hosts, hit the inventory host list view 3 times and get the order visible there each time and compare
+    inv_src = scm_inventory.inventory_sources.first()
+    host1 = inv_src.hosts.create(name='1', inventory=scm_inventory)
+    host2 = inv_src.hosts.create(name='2', inventory=scm_inventory)
+    host3 = inv_src.hosts.create(name='3', inventory=scm_inventory)
+    expected_ids = [host1.id, host2.id, host3.id]
+    resp = get(
+        reverse('api:inventory_hosts_list', kwargs={'pk': scm_inventory.id}),
+        admin_user,
+    ).data['results']
+    host_list = [host['id'] for host in resp]
+    assert host_list == expected_ids
+
+
+@pytest.mark.django_db
 def test_inventory_group_name_unique(scm_inventory, post, admin_user):
     inv_src = scm_inventory.inventory_sources.first()
     inv_src.hosts.create(name='barfoo', inventory=scm_inventory)
@@ -92,6 +95,24 @@ def test_inventory_group_name_unique(scm_inventory, post, admin_user):
 
     assert resp.status_code == 400
     assert "A Host with that name already exists." in json.dumps(resp.data)
+
+
+@pytest.mark.django_db
+def test_inventory_group_list_ordering(scm_inventory, get, put, admin_user):
+    # create 3 groups, hit the inventory groups list view 3 times and get the order visible there each time and compare
+    inv_src = scm_inventory.inventory_sources.first()
+    group1 = inv_src.groups.create(name='1', inventory=scm_inventory)
+    group2 = inv_src.groups.create(name='2', inventory=scm_inventory)
+    group3 = inv_src.groups.create(name='3', inventory=scm_inventory)
+    expected_ids = [group1.id, group2.id, group3.id]
+    group_ids = {}
+    for x in range(3):
+        resp = get(
+            reverse('api:inventory_groups_list', kwargs={'pk': scm_inventory.id}),
+            admin_user,
+        ).data['results']
+        group_ids[x] = [group['id'] for group in resp]
+    assert group_ids[0] == group_ids[1] == group_ids[2] == expected_ids
 
 
 @pytest.mark.parametrize("role_field,expected_status_code", [(None, 403), ('admin_role', 200), ('update_role', 403), ('adhoc_role', 403), ('use_role', 403)])
@@ -510,15 +531,12 @@ class TestControlledBySCM:
     def test_safe_method_works(self, get, options, scm_inventory, admin_user):
         get(scm_inventory.get_absolute_url(), admin_user, expect=200)
         options(scm_inventory.get_absolute_url(), admin_user, expect=200)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision != ''
 
     def test_vars_edit_reset(self, patch, scm_inventory, admin_user):
         patch(scm_inventory.get_absolute_url(), {'variables': 'hello: world'}, admin_user, expect=200)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision == ''
 
     def test_name_edit_allowed(self, patch, scm_inventory, admin_user):
         patch(scm_inventory.get_absolute_url(), {'variables': '---', 'name': 'newname'}, admin_user, expect=200)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision != ''
 
     def test_host_associations_reset(self, post, scm_inventory, admin_user):
         inv_src = scm_inventory.inventory_sources.first()
@@ -526,14 +544,12 @@ class TestControlledBySCM:
         g = inv_src.groups.create(name='fooland', inventory=scm_inventory)
         post(reverse('api:host_groups_list', kwargs={'pk': h.id}), {'id': g.id}, admin_user, expect=204)
         post(reverse('api:group_hosts_list', kwargs={'pk': g.id}), {'id': h.id}, admin_user, expect=204)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision == ''
 
     def test_group_group_associations_reset(self, post, scm_inventory, admin_user):
         inv_src = scm_inventory.inventory_sources.first()
         g1 = inv_src.groups.create(name='barland', inventory=scm_inventory)
         g2 = inv_src.groups.create(name='fooland', inventory=scm_inventory)
         post(reverse('api:group_children_list', kwargs={'pk': g1.id}), {'id': g2.id}, admin_user, expect=204)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision == ''
 
     def test_host_group_delete_reset(self, delete, scm_inventory, admin_user):
         inv_src = scm_inventory.inventory_sources.first()
@@ -541,7 +557,6 @@ class TestControlledBySCM:
         g = inv_src.groups.create(name='fooland', inventory=scm_inventory)
         delete(h.get_absolute_url(), admin_user, expect=204)
         delete(g.get_absolute_url(), admin_user, expect=204)
-        assert InventorySource.objects.get(inventory=scm_inventory.pk).scm_last_revision == ''
 
     def test_remove_scm_inv_src(self, delete, scm_inventory, admin_user):
         inv_src = scm_inventory.inventory_sources.first()
@@ -554,7 +569,6 @@ class TestControlledBySCM:
             {
                 'name': 'new inv src',
                 'source_project': project.pk,
-                'update_on_project_update': False,
                 'source': 'scm',
                 'overwrite_vars': True,
                 'source_vars': 'plugin: a.b.c',
@@ -562,27 +576,6 @@ class TestControlledBySCM:
             admin_user,
             expect=201,
         )
-
-    def test_adding_inv_src_prohibited(self, post, scm_inventory, project, admin_user):
-        post(
-            reverse('api:inventory_inventory_sources_list', kwargs={'pk': scm_inventory.id}),
-            {'name': 'new inv src', 'source_project': project.pk, 'update_on_project_update': True, 'source': 'scm', 'overwrite_vars': True},
-            admin_user,
-            expect=400,
-        )
-
-    def test_two_update_on_project_update_inv_src_prohibited(self, patch, scm_inventory, factory_scm_inventory, project, admin_user):
-        scm_inventory2 = factory_scm_inventory(name="scm_inventory2")
-        res = patch(
-            reverse('api:inventory_source_detail', kwargs={'pk': scm_inventory2.id}),
-            {
-                'update_on_project_update': True,
-            },
-            admin_user,
-            expect=400,
-        )
-        content = json.loads(res.content)
-        assert content['update_on_project_update'] == ["More than one SCM-based inventory source with update on project update " "per-inventory not allowed."]
 
     def test_adding_inv_src_without_proj_access_prohibited(self, post, project, inventory, rando):
         inventory.admin_role.members.add(rando)
@@ -592,3 +585,108 @@ class TestControlledBySCM:
             rando,
             expect=403,
         )
+
+
+@pytest.mark.django_db
+class TestConstructedInventory:
+    @pytest.fixture
+    def constructed_inventory(self, organization):
+        return Inventory.objects.create(name='constructed-test-inventory', kind='constructed', organization=organization)
+
+    def test_get_constructed_inventory(self, constructed_inventory, admin_user, get):
+        inv_src = constructed_inventory.inventory_sources.first()
+        inv_src.update_cache_timeout = 53
+        inv_src.save(update_fields=['update_cache_timeout'])
+        r = get(url=reverse('api:constructed_inventory_detail', kwargs={'pk': constructed_inventory.pk}), user=admin_user, expect=200)
+        assert r.data['update_cache_timeout'] == 53
+
+    def test_patch_constructed_inventory(self, constructed_inventory, admin_user, patch):
+        inv_src = constructed_inventory.inventory_sources.first()
+        assert inv_src.update_cache_timeout == 0
+        assert inv_src.limit == ''
+        r = patch(
+            url=reverse('api:constructed_inventory_detail', kwargs={'pk': constructed_inventory.pk}),
+            data=dict(update_cache_timeout=54, limit='foobar'),
+            user=admin_user,
+            expect=200,
+        )
+        assert r.data['update_cache_timeout'] == 54
+        inv_src = constructed_inventory.inventory_sources.first()
+        assert inv_src.update_cache_timeout == 54
+        assert inv_src.limit == 'foobar'
+
+    def test_patch_constructed_inventory_generated_source_limits_editable_fields(self, constructed_inventory, admin_user, project, patch):
+        inv_src = constructed_inventory.inventory_sources.first()
+        r = patch(
+            url=inv_src.get_absolute_url(),
+            data={
+                'source': 'scm',
+                'source_project': project.pk,
+                'source_path': '',
+                'source_vars': 'plugin: a.b.c',
+            },
+            expect=400,
+            user=admin_user,
+        )
+        assert str(r.data['error'][0]) == "Cannot change field 'source' on a constructed inventory source."
+
+        # Make sure it didn't get updated before we got the error
+        inv_src_after_err = constructed_inventory.inventory_sources.first()
+        assert inv_src.id == inv_src_after_err.id
+        assert inv_src.source == inv_src_after_err.source
+        assert inv_src.source_project == inv_src_after_err.source_project
+        assert inv_src.source_path == inv_src_after_err.source_path
+        assert inv_src.source_vars == inv_src_after_err.source_vars
+
+    def test_patch_constructed_inventory_generated_source_allows_source_vars_edit(self, constructed_inventory, admin_user, patch):
+        inv_src = constructed_inventory.inventory_sources.first()
+        patch(
+            url=inv_src.get_absolute_url(),
+            data={
+                'source_vars': 'plugin: a.b.c',
+            },
+            expect=200,
+            user=admin_user,
+        )
+
+        inv_src_after_patch = constructed_inventory.inventory_sources.first()
+
+        # sanity checks
+        assert inv_src.id == inv_src_after_patch.id
+        assert inv_src.source == 'constructed'
+        assert inv_src_after_patch.source == 'constructed'
+        assert inv_src.source_vars == ''
+
+        assert inv_src_after_patch.source_vars == 'plugin: a.b.c'
+
+    def test_create_constructed_inventory(self, constructed_inventory, admin_user, post, organization):
+        r = post(
+            url=reverse('api:constructed_inventory_list'),
+            data=dict(name='constructed-inventory-just-created', kind='constructed', organization=organization.id, update_cache_timeout=55, limit='foobar'),
+            user=admin_user,
+            expect=201,
+        )
+        pk = r.data['id']
+        constructed_inventory = Inventory.objects.get(pk=pk)
+        inv_src = constructed_inventory.inventory_sources.first()
+        assert inv_src.update_cache_timeout == 55
+        assert inv_src.limit == 'foobar'
+
+    def test_get_absolute_url_for_constructed_inventory(self, constructed_inventory, admin_user, get):
+        """
+        If we are using the normal inventory API endpoint to look at a
+        constructed inventory, then we should get a normal inventory API route
+        back. If we are accessing it via the special constructed inventory
+        endpoint, then we should get that back.
+        """
+
+        url_const = reverse('api:constructed_inventory_detail', kwargs={'pk': constructed_inventory.pk})
+        url_inv = reverse('api:inventory_detail', kwargs={'pk': constructed_inventory.pk})
+
+        const_r = get(url=url_const, user=admin_user, expect=200)
+        inv_r = get(url=url_inv, user=admin_user, expect=200)
+        assert const_r.data['url'] == url_const
+        assert inv_r.data['url'] == url_inv
+        assert inv_r.data['url'] != const_r.data['url']
+        assert inv_r.data['related']['constructed_url'] == url_const
+        assert const_r.data['related']['constructed_url'] == url_const

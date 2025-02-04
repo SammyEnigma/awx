@@ -1,13 +1,13 @@
 import inspect
 import logging
-import sys
 import json
+import time
 from uuid import uuid4
 
-from django.conf import settings
-from django_guid.middleware import GuidMiddleware
+from django_guid import get_guid
 
 from . import pg_bus_conn
+from awx.main.utils import is_testing
 
 logger = logging.getLogger('awx.main.dispatch')
 
@@ -49,16 +49,23 @@ class task:
     @task(queue='tower_broadcast')
     def announce():
         print("Run this everywhere!")
+
+    # The special parameter bind_kwargs tells the main dispatcher process to add certain kwargs
+
+    @task(bind_kwargs=['dispatch_time'])
+    def print_time(dispatch_time=None):
+        print(f"Time I was dispatched: {dispatch_time}")
     """
 
-    def __init__(self, queue=None):
+    def __init__(self, queue=None, bind_kwargs=None):
         self.queue = queue
+        self.bind_kwargs = bind_kwargs
 
     def __call__(self, fn=None):
         queue = self.queue
+        bind_kwargs = self.bind_kwargs
 
         class PublisherMixin(object):
-
             queue = None
 
             @classmethod
@@ -66,23 +73,35 @@ class task:
                 return cls.apply_async(args, kwargs)
 
             @classmethod
-            def apply_async(cls, args=None, kwargs=None, queue=None, uuid=None, **kw):
+            def get_async_body(cls, args=None, kwargs=None, uuid=None, **kw):
+                """
+                Get the python dict to become JSON data in the pg_notify message
+                This same message gets passed over the dispatcher IPC queue to workers
+                If a task is submitted to a multiprocessing pool, skipping pg_notify, this might be used directly
+                """
                 task_id = uuid or str(uuid4())
                 args = args or []
                 kwargs = kwargs or {}
+                obj = {'uuid': task_id, 'args': args, 'kwargs': kwargs, 'task': cls.name, 'time_pub': time.time()}
+                guid = get_guid()
+                if guid:
+                    obj['guid'] = guid
+                if bind_kwargs:
+                    obj['bind_kwargs'] = bind_kwargs
+                obj.update(**kw)
+                return obj
+
+            @classmethod
+            def apply_async(cls, args=None, kwargs=None, queue=None, uuid=None, **kw):
                 queue = queue or getattr(cls.queue, 'im_func', cls.queue)
                 if not queue:
                     msg = f'{cls.name}: Queue value required and may not be None'
                     logger.error(msg)
                     raise ValueError(msg)
-                obj = {'uuid': task_id, 'args': args, 'kwargs': kwargs, 'task': cls.name}
-                guid = GuidMiddleware.get_guid()
-                if guid:
-                    obj['guid'] = guid
-                obj.update(**kw)
+                obj = cls.get_async_body(args=args, kwargs=kwargs, uuid=uuid, **kw)
                 if callable(queue):
                     queue = queue()
-                if not settings.IS_TESTING(sys.argv):
+                if not is_testing():
                     with pg_bus_conn() as conn:
                         conn.notify(queue, json.dumps(obj))
                 return (obj, queue)
@@ -107,4 +126,5 @@ class task:
         setattr(fn, 'name', cls.name)
         setattr(fn, 'apply_async', cls.apply_async)
         setattr(fn, 'delay', cls.delay)
+        setattr(fn, 'get_async_body', cls.get_async_body)
         return fn

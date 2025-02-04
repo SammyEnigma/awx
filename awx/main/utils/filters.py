@@ -1,5 +1,7 @@
 import re
 from functools import reduce
+
+from django.core.exceptions import FieldDoesNotExist
 from pyparsing import (
     infixNotation,
     opAssoc,
@@ -15,8 +17,8 @@ from django.apps import apps
 from django.db import models
 from django.conf import settings
 
+from django_guid import get_guid
 from django_guid.log_filters import CorrelationId
-from django_guid.middleware import GuidMiddleware
 
 from awx import MODE
 from awx.main.constants import LOGGER_BLOCKLIST
@@ -63,7 +65,6 @@ def record_is_blocked(record):
 
 
 class ExternalLoggerEnabled(Filter):
-
     enabled_loggers = FieldFromSettings('LOG_AGGREGATOR_LOGGERS')
     enabled_flag = FieldFromSettings('LOG_AGGREGATOR_ENABLED')
 
@@ -162,7 +163,7 @@ class SmartFilter(object):
             else:
                 # detect loops and restrict access to sensitive fields
                 # this import is intentional here to avoid a circular import
-                from awx.api.filters import FieldLookupBackend
+                from ansible_base.rest_filters.rest_framework.field_lookup_backend import FieldLookupBackend
 
                 FieldLookupBackend().get_field_from_lookup(Host, k)
                 kwargs[k] = v
@@ -188,13 +189,11 @@ class SmartFilter(object):
         '''
 
         def _json_path_to_contains(self, k, v):
-            from awx.main.fields import JSONBField  # avoid a circular import
-
             if not k.startswith(SmartFilter.SEARCHABLE_RELATIONSHIP):
                 v = self.strip_quotes_traditional_logic(v)
                 return (k, v)
 
-            for match in JSONBField.get_lookups().keys():
+            for match in models.JSONField.get_lookups().keys():
                 match = '__{}'.format(match)
                 if k.endswith(match):
                     if match == '__exact':
@@ -327,7 +326,6 @@ class SmartFilter(object):
 
     @classmethod
     def query_from_string(cls, filter_string):
-
         """
         TODO:
         * handle values with " via: a.b.c.d="hello\"world"
@@ -357,7 +355,7 @@ class SmartFilter(object):
 
         try:
             res = boolExpr.parseString('(' + filter_string + ')')
-        except ParseException:
+        except (ParseException, FieldDoesNotExist):
             raise RuntimeError(u"Invalid query %s" % filter_string_raw)
 
         if len(res) > 0:
@@ -368,7 +366,7 @@ class SmartFilter(object):
 
 class DefaultCorrelationId(CorrelationId):
     def filter(self, record):
-        guid = GuidMiddleware.get_guid() or '-'
+        guid = get_guid() or '-'
         if MODE == 'development':
             guid = guid[:8]
         record.guid = guid
